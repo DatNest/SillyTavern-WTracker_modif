@@ -48,6 +48,145 @@ function validateProfile(raw) {
     };
 }
 
+
+
+const FIELD_TOOLTIPS = {
+    'Connection Profile': 'Which SillyTavern connection profile WTracker uses for tracker generation.',
+    'Auto Mode': 'Choose when WTracker runs automatically: never, on responses, on user inputs, or on both.',
+    'Prompt Engineering': 'Select the prompting strategy used when asking the model to update WTracker.',
+    'Prompt Sender Role': 'Controls whether WTracker sends its prompt as the user role or assistant role.',
+    'Schema Preset': 'Reusable schema preset: contains the tracked data structure and the HTML card template.',
+    'Schema': 'The JSON structure/example that tells WTracker what fields to track.',
+    'Prompt': 'Main prompt template for native mode.',
+    'Prompt (JSON)': 'Prompt template used in JSON prompt-engineering mode.',
+    'Prompt (XML)': 'Prompt template used in XML prompt-engineering mode.',
+    'Max Response Tokens': 'Maximum tokens WTracker may generate in its response.',
+    'Include Last X Messages (0 means all, 1 means last)': 'How many recent chat messages to include. 0 means all available messages.',
+    'Include Last X WTracker Messages': 'How many previous tracker states to include as extra context. 0 means none.',
+    'Saved settings profile': 'Choose which complete WTracker configuration is currently active.',
+};
+
+const PROFILE_ACTION_META = {
+    new: { icon: 'fa-plus', title: 'Create a new profile from the current settings' },
+    rename: { icon: 'fa-pen', title: 'Rename the selected profile' },
+    delete: { icon: 'fa-trash-can', title: 'Delete the selected profile' },
+    default: { icon: 'fa-house', title: 'Use the selected profile as the fallback for chats without a binding' },
+    export: { icon: 'fa-download', title: 'Export the selected profile to JSON' },
+    import: { icon: 'fa-upload', title: 'Import a JSON settings profile' },
+    bind: { icon: 'fa-link', title: 'Attach the selected profile to this chat' },
+    unbind: { icon: 'fa-link-slash', title: 'Remove the profile binding from this chat' },
+};
+
+function addHelpIcon(node, tooltip) {
+    if (!node || !tooltip) return;
+    node.title = tooltip;
+    if (node.querySelector('.wtracker-help-icon')) return;
+    const icon = document.createElement('span');
+    icon.className = 'wtracker-help-icon fa-regular fa-circle-question';
+    icon.title = tooltip;
+    icon.setAttribute('aria-hidden', 'true');
+    node.append(' ');
+    node.append(icon);
+}
+
+function makeSection(title, subtitle, icon, open = false) {
+    const section = document.createElement('details');
+    section.className = 'wtracker-ui-section';
+    section.open = open;
+    section.innerHTML = `
+      <summary>
+        <span class="fa-solid ${icon} wtracker-ui-section-icon" aria-hidden="true"></span>
+        <span class="wtracker-ui-section-text">
+          <span class="wtracker-ui-section-title">${title}</span>
+          <span class="wtracker-ui-section-subtitle">${subtitle}</span>
+        </span>
+      </summary>
+      <div class="wtracker-ui-section-body"></div>`;
+    return section;
+}
+
+function decorateFieldLabels(scope) {
+    scope.querySelectorAll('label').forEach(label => {
+        const text = label.textContent?.trim();
+        const tooltip = FIELD_TOOLTIPS[text];
+        if (tooltip) addHelpIcon(label, tooltip);
+    });
+    scope.querySelectorAll('.title_restorable > span:first-child').forEach(span => {
+        const text = span.textContent?.trim();
+        const tooltip = FIELD_TOOLTIPS[text];
+        if (tooltip) addHelpIcon(span, tooltip);
+    });
+    scope.querySelectorAll('select, input, textarea').forEach(control => {
+        const row = control.closest('.setting-row, .wtracker-profile-panel');
+        const label = row?.querySelector('label, .title_restorable > span:first-child');
+        const text = label?.textContent?.replace(/\s+/g, ' ')?.trim();
+        const tooltip = FIELD_TOOLTIPS[text];
+        if (tooltip && !control.title) control.title = tooltip;
+    });
+}
+
+function decorateProfilePanel(panel) {
+    if (!panel || panel.dataset.compactDecorated === '1') return;
+    panel.dataset.compactDecorated = '1';
+    const legend = panel.querySelector('legend');
+    if (legend && !legend.querySelector('.wtracker-profile-legend-icon')) {
+        legend.innerHTML = `<span class="fa-solid fa-layer-group wtracker-profile-legend-icon" aria-hidden="true"></span><span>${legend.textContent}</span>`;
+    }
+    const chatStatus = panel.querySelector('[data-chat-status]');
+    if (chatStatus && !chatStatus.closest('.wtracker-profile-status')) {
+        const wrap = document.createElement('div');
+        wrap.className = 'wtracker-profile-status';
+        wrap.append(chatStatus);
+        const debug = panel.querySelector('[data-chat-debug]');
+        if (debug) wrap.append(debug);
+        const actions = panel.querySelector('.wtracker-profile-chat .wtracker-profile-actions');
+        if (actions) wrap.append(actions);
+        panel.querySelector('.wtracker-profile-chat').replaceChildren(wrap);
+    }
+    panel.querySelectorAll('button[data-action]').forEach(button => {
+        const meta = PROFILE_ACTION_META[button.dataset.action];
+        if (!meta) return;
+        button.title = meta.title;
+        if (!button.querySelector('.fa-solid')) {
+            const text = button.textContent;
+            button.textContent = '';
+            const icon = document.createElement('span');
+            icon.className = `fa-solid ${meta.icon}`;
+            icon.setAttribute('aria-hidden', 'true');
+            const label = document.createElement('span');
+            label.textContent = text;
+            button.append(icon, label);
+        }
+    });
+    const selectLabel = panel.querySelector('label[for="wtracker-profile-select"]');
+    if (selectLabel) addHelpIcon(selectLabel, FIELD_TOOLTIPS['Saved settings profile']);
+}
+
+function decorateSettingsLayout(container) {
+    if (!container || container.querySelector('.wtracker-ui-section')) {
+        decorateFieldLabels(container);
+        decorateProfilePanel(container.querySelector('#wtracker-config-profiles'));
+        return;
+    }
+    decorateProfilePanel(container.querySelector('#wtracker-config-profiles'));
+    const rows = Array.from(container.children).filter(node => node.classList?.contains('setting-row'));
+    if (!rows.length) return;
+    const groups = [
+        { title: 'Generation', subtitle: 'Model and behaviour', icon: 'fa-sliders', open: true, items: rows.slice(0, 4) },
+        { title: 'Schema & Card', subtitle: 'Tracked data and visual template', icon: 'fa-table-list', open: false, items: rows.slice(4, 5) },
+        { title: 'Prompt Templates', subtitle: 'Instructions used by the model', icon: 'fa-file-lines', open: false, items: rows.slice(5, 8) },
+        { title: 'Context Limits', subtitle: 'How much recent history is included', icon: 'fa-gauge-high', open: false, items: rows.slice(8) },
+    ];
+    groups.forEach(group => {
+        if (!group.items.length) return;
+        const section = makeSection(group.title, group.subtitle, group.icon, group.open);
+        const body = section.querySelector('.wtracker-ui-section-body');
+        group.items.forEach(row => body.append(row));
+        container.append(section);
+    });
+    decorateFieldLabels(container);
+}
+
 function startAddon(manager, context) {
     const settings = manager.getSettings();
     const saveNative = manager.saveSettings.bind(manager);
@@ -221,8 +360,6 @@ function startAddon(manager, context) {
         // SillyTavern officially publishes CHAT_CHANGED after loading the
         // chat. One event -> one settings switch, no 75/350ms timers.
         syncChat(eventChatId);
-        console.debug('[WTracker Profiles v5] CHAT_CHANGED', {eventId: lastChatEvent,
-            key: activeChatKey, selectedProfile: activeId(), boundProfile: activeChatBinding});
     }
 
     // Observe the settings drawer because native WTracker is rendered by React,
@@ -363,6 +500,7 @@ function startAddon(manager, context) {
             scheduleDraw();
         });
         updateControls(panel);
+        decorateSettingsLayout(container);
     }
     function updateControls(panel = document.getElementById('wtracker-config-profiles')) {
         if (!panel) return;
@@ -379,11 +517,8 @@ function startAddon(manager, context) {
         if (debug) {
             const key = chatIdentity();
             const id = activeId();
-            const bound = key ? bindings()[key] : null;
-            const fresh = SillyTavern.getContext();
-            const getterChat = fresh?.getCurrentChatId?.();
-            debug.textContent = `Detected chat: ${key ? JSON.parse(key).at(-1) : '(none)'} · Bound: ${store()[bound]?.name || '(none)'} · Active: ${store()[id]?.name || id} · Switch events: ${observedChatEvents} · Stored bindings: ${Object.keys(bindings()).length}`;
-            debug.title = `Event ID: ${lastChatEvent}; getCurrentChatId: ${String(getterChat)}; chatId: ${String(fresh?.chatId)}; key: ${key || '(none)'}`;
+            debug.textContent = `Detected chat: ${key ? JSON.parse(key).at(-1) : '(none)'} · Active: ${store()[id]?.name || id} · Switch events: ${observedChatEvents}`;
+            debug.title = `Last CHAT_CHANGED argument: ${lastChatEvent}; mapping key: ${key || '(none)'}`;
         }
         panel.querySelector('[data-action=bind]').disabled = !chatIdentity();
         panel.querySelector('[data-action=bind]').textContent = linkedId
@@ -391,6 +526,7 @@ function startAddon(manager, context) {
             : 'Bind selected to this chat';
         panel.querySelector('[data-action=unbind]').disabled = !linkedId;
         panel.querySelector('[data-action=default]').disabled = settings.defaultConfigurationProfile === activeId();
+        decorateProfilePanel(panel);
     }
     function notify(message) {
         const element = document.querySelector('#wtracker-config-profiles [data-profile-message]');
@@ -413,9 +549,7 @@ function startAddon(manager, context) {
     scheduleDraw();
     const eventType = context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED;
     if (!eventType) console.error('[WTracker Profiles] CHAT_CHANGED event is not available.');
-    else if (typeof context.eventSource.makeFirst === 'function') {
-        context.eventSource.makeFirst(eventType, handleChatChanged);
-    } else context.eventSource.on(eventType, handleChatChanged);
+    else context.eventSource.on(eventType, handleChatChanged);
     // Initial sync once, after the original settings have been initialized.
     syncChat();
 

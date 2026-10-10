@@ -69,3 +69,24 @@
 }
 /* Added configuration profiles UI */
 .wtracker-settings .wtracker-profile-panel{display:flex;flex-direction:column;gap:8px;min-width:0;padding:10px;border:1px solid var(--SmartThemeBorderColor,#7776);border-radius:8px}.wtracker-settings .wtracker-profile-panel legend{padding:0 5px;font-weight:bold}.wtracker-settings .wtracker-profile-actions{display:flex;flex-wrap:wrap;gap:6px}.wtracker-settings .wtracker-profile-actions button{flex:0 1 auto}.wtracker-settings .wtracker-profile-chat{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid var(--SmartThemeBorderColor,#7776)}.wtracker-settings .wtracker-profile-message{font-size:.9em;opacity:.9;overflow-wrap:anywhere}
+
+
+/* v6 compact UI decorator */
+.wtracker-settings .wtracker-profile-panel{gap:10px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--SmartThemeBlurTintColor,rgba(255,255,255,.03)) 70%,transparent)}
+.wtracker-settings .wtracker-profile-panel legend{display:flex;align-items:center;gap:8px;font-weight:700}
+.wtracker-settings .wtracker-profile-actions{gap:6px}.wtracker-settings .wtracker-profile-actions .menu_button{display:inline-flex;align-items:center;gap:6px}
+.wtracker-settings .wtracker-profile-status{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--SmartThemeBorderColor,#7776);border-radius:10px;background:color-mix(in srgb,var(--SmartThemeQuoteColor,rgba(255,255,255,.04)) 55%,transparent)}
+.wtracker-settings .wtracker-profile-chat{padding-top:0;border-top:0}
+.wtracker-settings .wtracker-help-icon{opacity:.65;font-size:.9em;cursor:help}
+.wtracker-settings .wtracker-ui-section{border:1px solid var(--SmartThemeBorderColor,#7776);border-radius:12px;background:color-mix(in srgb,var(--SmartThemeBlurTintColor,rgba(255,255,255,.02)) 60%,transparent);overflow:hidden}
+.wtracker-settings .wtracker-ui-section summary{list-style:none;display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;user-select:none}
+.wtracker-settings .wtracker-ui-section summary::-webkit-details-marker{display:none}
+.wtracker-settings .wtracker-ui-section summary::after{content:"\f078";font-family:"Font Awesome 6 Free";font-weight:900;margin-left:auto;opacity:.7;transition:transform .2s ease}
+.wtracker-settings .wtracker-ui-section[open] summary::after{transform:rotate(180deg)}
+.wtracker-settings .wtracker-ui-section-icon{width:16px;opacity:.9}
+.wtracker-settings .wtracker-ui-section-text{display:flex;flex-direction:column;gap:2px;min-width:0}.wtracker-settings .wtracker-ui-section-title{font-weight:700}.wtracker-settings .wtracker-ui-section-subtitle{font-size:.9em;opacity:.75}
+.wtracker-settings .wtracker-ui-section-body{display:flex;flex-direction:column;gap:10px;padding:0 12px 12px}
+.wtracker-settings .wtracker-ui-section-body>.setting-row{padding:8px;border:1px solid var(--SmartThemeBorderColor,#7776);border-radius:10px;background:color-mix(in srgb,var(--SmartThemeBlurTintColor,rgba(255,255,255,.03)) 70%,transparent);margin-top:0 !important}
+.wtracker-settings .wtracker-ui-section-body .setting-row:last-child{margin-top:0}
+.wtracker-settings .wtracker-ui-section-body .title_restorable,.wtracker-settings .wtracker-ui-section-body label{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+.wtracker-settings .wtracker-profile-message{font-size:.92em;overflow-wrap:anywhere}
