@@ -9,8 +9,6 @@ const PROFILE_KEYS = [
     'promptJson', 'promptXml', 'promptEngineeringMode', 'promptRole',
     'maxResponseToken', 'includeLastXMessages', 'includeLastXWTrackerMessages',
 ];
-const CHATTRACKER = 'WTracker';
-const BINDKEY = 'configurationProfileId';
 const clone = value => structuredClone(value);
 const snapshot = settings => Object.fromEntries(PROFILE_KEYS.map(key => [key, clone(settings[key])]));
 const uuid = () => `profile_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -56,15 +54,36 @@ function startAddon(manager, context) {
     let applying = false;
     let activeChatKey = null;
     let activeChatBinding = null;
+    let pendingSyncTimers = [];
     const save = () => saveNative();
     const store = () => settings.configurationProfiles;
     const activeId = () => settings.activeConfigurationProfile;
+    // Save chat-to-profile mappings in WTracker's extension settings, keyed by
+    // both owner and chat file. Earlier versions depended on chatMetadata; on
+    // some hosts its reference can remain stale during a chat transition.
+    // Keeping a distinct key for each character/group also prevents collisions
+    // when two characters have chats with the same filename.
     const chatContext = () => {
         const current = SillyTavern.getContext();
-        return current && current.chatId && current.chatMetadata ? current : null;
+        return current && current.chatId != null && current.chatId !== '' ? current : null;
     };
-    const boundId = () => chatContext()?.chatMetadata?.[CHATTRACKER]?.[BINDKEY] || null;
-    const chatIdentity = () => chatContext()?.chatId || null;
+    const chatIdentity = () => {
+        const current = chatContext();
+        if (!current) return null;
+        const group = current.groupId;
+        if (group !== null && group !== undefined && group !== '') {
+            return JSON.stringify(['group', String(group), String(current.chatId)]);
+        }
+        const charId = current.characterId;
+        if (charId === null || charId === undefined || charId === '') return null;
+        const avatar = current.characters?.[charId]?.avatar;
+        return JSON.stringify(['character', String(avatar || charId), String(current.chatId)]);
+    };
+    const bindings = () => settings.configurationChatBindings;
+    const boundId = () => {
+        const key = chatIdentity();
+        return key && Object.hasOwn(bindings(), key) ? bindings()[key] : null;
+    };
 
     if (!isObject(settings.configurationProfiles) || !Object.keys(settings.configurationProfiles).length) {
         settings.configurationProfiles = {
@@ -75,6 +94,7 @@ function startAddon(manager, context) {
     }
     if (!store()[activeId()]) settings.activeConfigurationProfile = Object.keys(store())[0];
     if (!store()[settings.defaultConfigurationProfile]) settings.defaultConfigurationProfile = activeId();
+    if (!isObject(settings.configurationChatBindings)) settings.configurationChatBindings = {};
     save();
 
     // The original React controls save through this manager. Mirror their edits
@@ -141,58 +161,56 @@ function startAddon(manager, context) {
         setTimeout(() => observer.disconnect(), 1500);
     }
 
-    function persistChatMetadata(current) {
-        // saveMetadataDebounced exists in recent SillyTavern versions. Use the
-        // official saveMetadata fallback for older builds.
-        if (typeof current.saveMetadataDebounced === 'function') current.saveMetadataDebounced();
-        else if (typeof current.saveMetadata === 'function') {
-            Promise.resolve(current.saveMetadata()).catch(error =>
-                console.error('WTracker: could not save chat binding', error));
-        }
-    }
     function setChatBinding(id) {
-        const current = chatContext();
-        if (!current || !store()[id]) return false;
-        current.chatMetadata[CHATTRACKER] ||= {};
-        current.chatMetadata[CHATTRACKER][BINDKEY] = id;
-        activeChatKey = chatIdentity();
+        const key = chatIdentity();
+        if (!key || !store()[id]) return false;
+        // Overwrite only THIS chat's mapping. Other chat bindings are untouched.
+        bindings()[key] = id;
+        activeChatKey = key;
         activeChatBinding = id;
-        persistChatMetadata(current);
+        save();
         switchTo(id);
         scheduleDraw();
         return true;
     }
     function removeChatBinding() {
-        const current = chatContext();
-        if (!current?.chatMetadata?.[CHATTRACKER]?.[BINDKEY]) return;
-        delete current.chatMetadata[CHATTRACKER][BINDKEY];
+        const key = chatIdentity();
+        if (!key || !Object.hasOwn(bindings(), key)) return false;
+        delete bindings()[key];
+        activeChatKey = key;
         activeChatBinding = null;
-        persistChatMetadata(current);
+        save();
         switchTo(settings.defaultConfigurationProfile);
         scheduleDraw();
+        return true;
     }
     function syncChat() {
         const key = chatIdentity();
-        let selected = boundId();
+        let selected = key ? boundId() : null;
         if (selected && !store()[selected]) {
-            const current = chatContext();
-            if (current?.chatMetadata?.[CHATTRACKER]) {
-                delete current.chatMetadata[CHATTRACKER][BINDKEY];
-                persistChatMetadata(current);
-            }
+            delete bindings()[key];
+            save();
             selected = null;
         }
-        // Checking both the chat and its binding also handles cases in which
-        // the host supplies chatMetadata shortly after the chat ID changes.
-        if (key === activeChatKey && selected === activeChatBinding &&
-            activeId() === (selected || settings.defaultConfigurationProfile)) {
+        const targetId = selected || settings.defaultConfigurationProfile;
+        if (key === activeChatKey && selected === activeChatBinding && activeId() === targetId) {
             scheduleDraw();
             return;
         }
         activeChatKey = key;
         activeChatBinding = selected;
-        switchTo(selected || settings.defaultConfigurationProfile);
+        switchTo(targetId);
         scheduleDraw();
+    }
+    function scheduleChatSync() {
+        // ST builds chat state asynchronously on certain hosts. Recheck after
+        // the switch event to avoid reading the outgoing chat's context.
+        for (const timer of pendingSyncTimers) clearTimeout(timer);
+        pendingSyncTimers = [];
+        syncChat();
+        for (const delay of [75, 350]) {
+            pendingSyncTimers.push(setTimeout(syncChat, delay));
+        }
     }
 
     // Observe the settings drawer because native WTracker is rendered by React,
@@ -221,6 +239,7 @@ function startAddon(manager, context) {
             <button class="menu_button" type="button" data-action="new">New</button>
             <button class="menu_button" type="button" data-action="rename">Rename</button>
             <button class="menu_button" type="button" data-action="delete">Delete</button>
+            <button class="menu_button" type="button" data-action="default">Set as default</button>
             <button class="menu_button" type="button" data-action="export">Export JSON</button>
             <button class="menu_button" type="button" data-action="import">Import JSON</button>
           </div>
@@ -236,7 +255,9 @@ function startAddon(manager, context) {
           <div data-profile-message role="status" class="wtracker-profile-message"></div>`;
         container.prepend(panel);
         panel.querySelector('#wtracker-profile-select').addEventListener('change', event => {
-            switchTo(event.target.value, !boundId());
+            // Choosing a profile is a preview, not a global default change.
+            // Bind explicitly below or use the dedicated Default button.
+            switchTo(event.target.value);
         });
         panel.querySelector('input[type=file]').addEventListener('change', async event => {
             const file = event.target.files?.[0];
@@ -246,7 +267,7 @@ function startAddon(manager, context) {
                 const id = uuid();
                 store()[id] = profile;
                 save();
-                switchTo(id, !boundId());
+                switchTo(id);
                 notify(`Imported: ${profile.name}`);
             } catch (error) {
                 notify(`Import failed: ${error.message}`);
@@ -265,7 +286,7 @@ function startAddon(manager, context) {
                     const id = uuid();
                     store()[id] = { name, config: snapshot(settings) };
                     save();
-                    switchTo(id, !boundId());
+                    switchTo(id);
                     notify(`Created: ${name}`);
                     break;
                 }
@@ -276,6 +297,11 @@ function startAddon(manager, context) {
                     save();
                     updateControls();
                     notify(`Renamed: ${name}`);
+                    break;
+                }
+                case 'default': {
+                    switchTo(activeId(), true);
+                    notify('Default profile updated for unbound chats.');
                     break;
                 }
                 case 'delete': {
@@ -289,12 +315,11 @@ function startAddon(manager, context) {
                     delete store()[removedId];
                     const fallback = Object.keys(store())[0];
                     if (settings.defaultConfigurationProfile === removedId) settings.defaultConfigurationProfile = fallback;
-                    if (boundId() === removedId) {
-                        const current = chatContext();
-                        delete current.chatMetadata[CHATTRACKER][BINDKEY];
-                        persistChatMetadata(current);
+                    for (const [key, id] of Object.entries(bindings())) {
+                        if (id === removedId) delete bindings()[key];
                     }
-                    switchTo(settings.defaultConfigurationProfile);
+                    activeChatBinding = boundId();
+                    switchTo(activeChatBinding || settings.defaultConfigurationProfile);
                     notify('Profile deleted.');
                     break;
                 }
@@ -319,8 +344,7 @@ function startAddon(manager, context) {
                     else notify('Open a chat first.');
                     break;
                 case 'unbind':
-                    removeChatBinding();
-                    notify('Chat binding removed.');
+                    if (removeChatBinding()) notify('Chat binding removed.');
                     break;
             }
             scheduleDraw();
@@ -338,8 +362,12 @@ function startAddon(manager, context) {
             ? 'Open a chat to bind a profile.'
             : linkedId ? `This chat: ${store()[linkedId]?.name || 'missing profile'}`
               : 'This chat: no binding (uses global default)';
-        panel.querySelector('[data-action=bind]').disabled = !chatContext();
+        panel.querySelector('[data-action=bind]').disabled = !chatIdentity();
+        panel.querySelector('[data-action=bind]').textContent = linkedId
+            ? 'Bind selected (replace this chat binding)'
+            : 'Bind selected to this chat';
         panel.querySelector('[data-action=unbind]').disabled = !linkedId;
+        panel.querySelector('[data-action=default]').disabled = settings.defaultConfigurationProfile === activeId();
     }
     function notify(message) {
         const element = document.querySelector('#wtracker-config-profiles [data-profile-message]');
@@ -354,12 +382,12 @@ function startAddon(manager, context) {
         observer.observe(root, { childList: true, subtree: true });
     }
     scheduleDraw();
-    context.eventSource.on(context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED || 'chat_id_changed', syncChat);
+    context.eventSource.on(context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED || 'chat_id_changed', scheduleChatSync);
     // Cheap consistency check when returning to the extension settings after
     // a chat transition. It does not poll and does not remount unnecessarily.
     const settingsRoot = document.getElementById('wtracker-react-settings-root');
     settingsRoot?.addEventListener('pointerdown', () => {
-        if (chatIdentity() !== activeChatKey) syncChat();
+        if (chatIdentity() !== activeChatKey) scheduleChatSync();
     }, true);
     // The original module subscribes asynchronously after loading a template;
     // this handler is independent and runs when a chat is opened.
