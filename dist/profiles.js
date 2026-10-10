@@ -54,7 +54,9 @@ function startAddon(manager, context) {
     let applying = false;
     let activeChatKey = null;
     let activeChatBinding = null;
-    let pendingSyncTimers = [];
+    let observedChatEvents = 0;
+    let lastChatEvent = 'none';
+    let settingsFieldsDirty = false;
     const save = () => saveNative();
     const store = () => settings.configurationProfiles;
     const activeId = () => settings.activeConfigurationProfile;
@@ -65,25 +67,32 @@ function startAddon(manager, context) {
     // when two characters have chats with the same filename.
     const chatContext = () => {
         const current = SillyTavern.getContext();
-        return current && current.chatId != null && current.chatId !== '' ? current : null;
-    };
-    const chatIdentity = () => {
-        const current = chatContext();
         if (!current) return null;
+        const chatId = current.getCurrentChatId?.() ?? current.chatId;
+        return chatId != null && chatId !== '' ? current : null;
+    };
+    // The identifier is read from the *fresh* ST context. CHAT_CHANGED also
+    // supplies the authoritative new chat ID; use it when available rather
+    // than polling and accidentally re-reading the outgoing chat.
+    const chatIdentity = (eventChatId) => {
+        const current = SillyTavern.getContext();
+        if (!current) return null;
+        const id = eventChatId != null && eventChatId !== ''
+            ? eventChatId
+            : current.getCurrentChatId?.() ?? current.chatId;
+        if (id == null || id === '') return null;
         const group = current.groupId;
         if (group !== null && group !== undefined && group !== '') {
-            return JSON.stringify(['group', String(group), String(current.chatId)]);
+            return JSON.stringify(['group', String(group), String(id)]);
         }
         const charId = current.characterId;
         if (charId === null || charId === undefined || charId === '') return null;
         const avatar = current.characters?.[charId]?.avatar;
-        return JSON.stringify(['character', String(avatar || charId), String(current.chatId)]);
+        return JSON.stringify(['character', String(avatar || charId), String(id)]);
     };
     const bindings = () => settings.configurationChatBindings;
-    const boundId = () => {
-        const key = chatIdentity();
-        return key && Object.hasOwn(bindings(), key) ? bindings()[key] : null;
-    };
+    const boundId = (key = chatIdentity()) =>
+        key && Object.hasOwn(bindings(), key) ? bindings()[key] : null;
 
     if (!isObject(settings.configurationProfiles) || !Object.keys(settings.configurationProfiles).length) {
         settings.configurationProfiles = {
@@ -126,39 +135,40 @@ function startAddon(manager, context) {
         } finally {
             applying = false;
         }
-        if (configurationChanged) refreshNativeSettings();
+        if (configurationChanged) {
+            settingsFieldsDirty = true;
+            // If the settings are open, refresh the native controls. When
+            // closed, do nothing costly on every CHAT_CHANGED event.
+            refreshNativeSettingsIfVisible();
+        }
         scheduleDraw();
         return true;
     }
 
-    function refreshNativeSettings() {
-        if (typeof globalThis.__wtrackerRefreshSettings !== 'function') return;
+    function refreshNativeSettingsIfVisible() {
+        if (!settingsFieldsDirty || typeof globalThis.__wtrackerRefreshSettings !== 'function') return;
         const root = document.getElementById('wtracker-react-settings-root');
-        const oldDrawer = root?.querySelector('.inline-drawer-content');
-        // Only restore the drawer when it was previously open. Preserve the
-        // original SillyTavern closed-state CSS for all other cases.
-        const wasOpen = !!oldDrawer && (typeof getComputedStyle !== 'function'
-            ? oldDrawer.style.display !== 'none'
-            : getComputedStyle(oldDrawer).display !== 'none');
-        if (!wasOpen || !root || typeof MutationObserver === 'undefined') {
+        const drawer = root?.querySelector('.inline-drawer-content');
+        if (!root || !drawer || (typeof getComputedStyle === 'function'
+            ? getComputedStyle(drawer).display === 'none'
+            : drawer.style.display === 'none')) return;
+        settingsFieldsDirty = false;
+        // This affects ONLY the WTracker settings UI; never #chat or messages.
+        if (typeof MutationObserver === 'undefined') {
             globalThis.__wtrackerRefreshSettings();
             return;
         }
-        let restored = false;
         const observer = new MutationObserver(() => {
-            const drawer = root.querySelector('.inline-drawer-content');
-            if (!drawer || drawer === oldDrawer) return;
-            if (restored) return;
-            restored = true;
-            // React recreated the drawer, so restore its visible state.
-            drawer.style.display = 'block';
+            const newDrawer = root.querySelector('.inline-drawer-content');
+            if (!newDrawer || newDrawer === drawer) return;
+            newDrawer.style.display = 'block';
             root.querySelector('.inline-drawer-icon')?.classList.remove('down');
             observer.disconnect();
         });
         observer.observe(root, { childList: true, subtree: true });
         globalThis.__wtrackerRefreshSettings();
-        // Safety: observer is only needed during this React commit.
-        setTimeout(() => observer.disconnect(), 1500);
+        // One short cleanup for the UI observer (not chat polling).
+        setTimeout(() => observer.disconnect(), 300);
     }
 
     function setChatBinding(id) {
@@ -184,15 +194,17 @@ function startAddon(manager, context) {
         scheduleDraw();
         return true;
     }
-    function syncChat() {
-        const key = chatIdentity();
-        let selected = key ? boundId() : null;
+    function syncChat(eventChatId) {
+        const key = chatIdentity(eventChatId);
+        let selected = boundId(key);
         if (selected && !store()[selected]) {
             delete bindings()[key];
             save();
             selected = null;
         }
         const targetId = selected || settings.defaultConfigurationProfile;
+        // Ignore redundant events. In particular, do not remount React, walk
+        // chat messages, or touch the #chat DOM just to display a profile.
         if (key === activeChatKey && selected === activeChatBinding && activeId() === targetId) {
             scheduleDraw();
             return;
@@ -202,15 +214,13 @@ function startAddon(manager, context) {
         switchTo(targetId);
         scheduleDraw();
     }
-    function scheduleChatSync() {
-        // ST builds chat state asynchronously on certain hosts. Recheck after
-        // the switch event to avoid reading the outgoing chat's context.
-        for (const timer of pendingSyncTimers) clearTimeout(timer);
-        pendingSyncTimers = [];
-        syncChat();
-        for (const delay of [75, 350]) {
-            pendingSyncTimers.push(setTimeout(syncChat, delay));
-        }
+    function handleChatChanged(eventChatId) {
+        observedChatEvents += 1;
+        lastChatEvent = typeof eventChatId === 'string' || typeof eventChatId === 'number'
+            ? String(eventChatId) : '(no chat id passed)';
+        // SillyTavern officially publishes CHAT_CHANGED after loading the
+        // chat. One event -> one settings switch, no 75/350ms timers.
+        syncChat(eventChatId);
     }
 
     // Observe the settings drawer because native WTracker is rendered by React,
@@ -246,6 +256,7 @@ function startAddon(manager, context) {
           <input type="file" accept=".json,application/json" style="display:none" aria-label="Import WTracker profile" />
           <div class="wtracker-profile-chat">
             <span data-chat-status></span>
+            <small data-chat-debug style="display:block;opacity:.7;overflow-wrap:anywhere"></small>
             <div class="wtracker-profile-actions">
               <button class="menu_button" type="button" data-action="bind">Bind selected to this chat</button>
               <button class="menu_button" type="button" data-action="unbind">Unbind</button>
@@ -362,6 +373,13 @@ function startAddon(manager, context) {
             ? 'Open a chat to bind a profile.'
             : linkedId ? `This chat: ${store()[linkedId]?.name || 'missing profile'}`
               : 'This chat: no binding (uses global default)';
+        const debug = panel.querySelector('[data-chat-debug]');
+        if (debug) {
+            const key = chatIdentity();
+            const id = activeId();
+            debug.textContent = `Detected chat: ${key ? JSON.parse(key).at(-1) : '(none)'} · Active: ${store()[id]?.name || id} · Switch events: ${observedChatEvents}`;
+            debug.title = `Last CHAT_CHANGED argument: ${lastChatEvent}; mapping key: ${key || '(none)'}`;
+        }
         panel.querySelector('[data-action=bind]').disabled = !chatIdentity();
         panel.querySelector('[data-action=bind]').textContent = linkedId
             ? 'Bind selected (replace this chat binding)'
@@ -375,23 +393,25 @@ function startAddon(manager, context) {
     }
 
     const root = document.getElementById('wtracker-react-settings-root');
-    if (root) {
+    if (root && typeof MutationObserver !== 'undefined') {
         const observer = new MutationObserver(() => {
             if (!document.getElementById('wtracker-config-profiles')) scheduleDraw();
         });
         observer.observe(root, { childList: true, subtree: true });
+        // Native controls may need refreshing when someone OPENS the drawer.
+        // This is UI-only; it does not modify/reload a chat.
+        root.addEventListener('click', event => {
+            if (!event.target.closest('.inline-drawer-toggle')) return;
+            queueMicrotask(() => refreshNativeSettingsIfVisible());
+        });
     }
     scheduleDraw();
-    context.eventSource.on(context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED || 'chat_id_changed', scheduleChatSync);
-    // Cheap consistency check when returning to the extension settings after
-    // a chat transition. It does not poll and does not remount unnecessarily.
-    const settingsRoot = document.getElementById('wtracker-react-settings-root');
-    settingsRoot?.addEventListener('pointerdown', () => {
-        if (chatIdentity() !== activeChatKey) scheduleChatSync();
-    }, true);
-    // The original module subscribes asynchronously after loading a template;
-    // this handler is independent and runs when a chat is opened.
+    const eventType = context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED;
+    if (!eventType) console.error('[WTracker Profiles] CHAT_CHANGED event is not available.');
+    else context.eventSource.on(eventType, handleChatChanged);
+    // Initial sync once, after the original settings have been initialized.
     syncChat();
+
     return { switchTo, setChatBinding, removeChatBinding, syncChat, snapshot: () => snapshot(settings) };
 }
 
