@@ -8,9 +8,11 @@ const PROFILE_KEYS = [
     'profileId', 'autoMode', 'schemaPreset', 'schemaPresets', 'prompt',
     'promptJson', 'promptXml', 'promptEngineeringMode', 'promptRole',
     'maxResponseToken', 'includeLastXMessages', 'includeLastXWTrackerMessages',
+    'sendTrackerStateToRoleplayModel',
 ];
 const clone = value => structuredClone(value);
-const snapshot = settings => Object.fromEntries(PROFILE_KEYS.map(key => [key, clone(settings[key])]));
+const snapshot = settings => Object.fromEntries(PROFILE_KEYS.map(key =>
+    [key, key === 'sendTrackerStateToRoleplayModel' ? settings[key] === true : clone(settings[key])]));
 const uuid = () => `profile_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 const isObject = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 
@@ -44,7 +46,8 @@ function validateProfile(raw) {
     }
     return {
         name: raw.name.trim(),
-        config: Object.fromEntries(PROFILE_KEYS.map(key => [key, clone(c[key])])),
+        config: Object.fromEntries(PROFILE_KEYS.map(key =>
+            [key, key === 'sendTrackerStateToRoleplayModel' ? c[key] === true : clone(c[key])])),
     };
 }
 
@@ -182,6 +185,29 @@ function decorateSettingsLayout(container) {
         const section = makeSection(group.title, group.subtitle, group.icon, group.open);
         const body = section.querySelector('.wtracker-ui-section-body');
         group.items.forEach(row => body.append(row));
+        if (group.title === 'Generation') {
+            const row = document.createElement('label');
+            row.className = 'wtracker-roleplay-injection-row';
+            row.title = 'When enabled, the last tracker JSON is sent to the main roleplay model as a user message. Leave disabled to prevent technical JSON appearing in roleplay responses. WTracker Qwen still receives its previous tracker states.';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.id = 'wtracker-roleplay-injection';
+            checkbox.checked = settings.sendTrackerStateToRoleplayModel === true;
+            checkbox.addEventListener('change', () => {
+                const enabled = checkbox.checked;
+                settings.sendTrackerStateToRoleplayModel = enabled;
+                store()[activeId()].config.sendTrackerStateToRoleplayModel = enabled;
+                save();
+            });
+            const text = document.createElement('span');
+            text.className = 'wtracker-roleplay-injection-label';
+            text.textContent = 'Send tracker JSON to roleplay model';
+            const help = document.createElement('span');
+            help.className = 'fa-regular fa-circle-question wtracker-help-icon';
+            help.setAttribute('aria-hidden', 'true');
+            row.append(checkbox, text, help);
+            body.append(row);
+        }
         container.append(section);
     });
     decorateFieldLabels(container);
@@ -243,6 +269,12 @@ function startAddon(manager, context) {
     if (!store()[activeId()]) settings.activeConfigurationProfile = Object.keys(store())[0];
     if (!store()[settings.defaultConfigurationProfile]) settings.defaultConfigurationProfile = activeId();
     if (!isObject(settings.configurationChatBindings)) settings.configurationChatBindings = {};
+    // Backward-compatible default: do not inject tracker JSON into roleplay AI.
+    // This field is per-profile; existing profile files can omit it.
+    for (const profile of Object.values(store())) {
+        profile.config.sendTrackerStateToRoleplayModel = profile.config.sendTrackerStateToRoleplayModel === true;
+    }
+    settings.sendTrackerStateToRoleplayModel = store()[activeId()].config.sendTrackerStateToRoleplayModel === true;
     save();
 
     // The original React controls save through this manager. Mirror their edits
@@ -526,6 +558,8 @@ function startAddon(manager, context) {
             : 'Bind selected to this chat';
         panel.querySelector('[data-action=unbind]').disabled = !linkedId;
         panel.querySelector('[data-action=default]').disabled = settings.defaultConfigurationProfile === activeId();
+        const sendCheckbox = document.querySelector('#wtracker-roleplay-injection');
+        if (sendCheckbox) sendCheckbox.checked = settings.sendTrackerStateToRoleplayModel === true;
         decorateProfilePanel(panel);
     }
     function notify(message) {

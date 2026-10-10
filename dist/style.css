@@ -90,3 +90,8 @@
 .wtracker-settings .wtracker-ui-section-body .setting-row:last-child{margin-top:0}
 .wtracker-settings .wtracker-ui-section-body .title_restorable,.wtracker-settings .wtracker-ui-section-body label{display:inline-flex;align-items:center;gap:6px;font-weight:600}
 .wtracker-settings .wtracker-profile-message{font-size:.92em;overflow-wrap:anywhere}
+
+/* v7 roleplay-model JSON injection control */
+.wtracker-settings .wtracker-roleplay-injection-row{display:flex;align-items:center;gap:9px;cursor:pointer;padding:10px;border-radius:10px;border:1px solid var(--SmartThemeBorderColor,#7776);background:color-mix(in srgb,var(--SmartThemeBlurTintColor,rgba(255,255,255,.02)) 60%,transparent);font-weight:600}
+.wtracker-settings .wtracker-roleplay-injection-row input{flex-shrink:0;margin:0;cursor:pointer}
+.wtracker-settings .wtracker-roleplay-injection-row .wtracker-roleplay-injection-label{flex:1;min-width:0}
