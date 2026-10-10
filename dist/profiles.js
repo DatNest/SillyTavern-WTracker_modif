@@ -129,7 +129,7 @@ function decorateFieldLabels(scope) {
 }
 
 function decorateProfilePanel(panel) {
-    if (!panel || panel.dataset.compactDecorated === '1') return;
+    if (!panel) return;
     panel.dataset.compactDecorated = '1';
     const legend = panel.querySelector('legend');
     if (legend && !legend.querySelector('.wtracker-profile-legend-icon')) {
@@ -157,6 +157,7 @@ function decorateProfilePanel(panel) {
             icon.className = `fa-solid ${meta.icon}`;
             icon.setAttribute('aria-hidden', 'true');
             const label = document.createElement('span');
+            label.className = 'wtracker-action-label';
             label.textContent = text;
             button.append(icon, label);
         }
@@ -165,51 +166,78 @@ function decorateProfilePanel(panel) {
     if (selectLabel) addHelpIcon(selectLabel, FIELD_TOOLTIPS['Saved settings profile']);
 }
 
-function decorateSettingsLayout(container) {
-    if (!container || container.querySelector('.wtracker-ui-section')) {
-        decorateFieldLabels(container);
-        decorateProfilePanel(container.querySelector('#wtracker-config-profiles'));
-        return;
+// Keep the visual grouping separate from the tracker logic. This function can
+// re-run after React recreates individual settings rows without touching #chat.
+const WTRACKER_SECTION_DEFINITIONS = [
+    {key:'Generation',subtitle:'Model and behaviour',icon:'fa-sliders',open:true},
+    {key:'Schema & Card',subtitle:'Tracked data and visual template',icon:'fa-table-list',open:false},
+    {key:'Prompt Templates',subtitle:'Instructions used by the model',icon:'fa-file-lines',open:false},
+    {key:'Context Limits',subtitle:'How much recent history is included',icon:'fa-gauge-high',open:false},
+];
+const wtrackerSectionOpenState = new Map();
+
+function whichWTrackerSection(row, position) {
+    const label = row.querySelector('label')?.textContent?.trim() || '';
+    const heading = row.querySelector('.title_restorable > span:first-child')?.textContent?.trim() || '';
+    if (['Connection Profile','Auto Mode','Prompt Engineering','Prompt Sender Role'].some(x => label.startsWith(x))) return 'Generation';
+    if (label.startsWith('Schema Preset') || heading.startsWith('Schema')) return 'Schema & Card';
+    if (['Prompt','Prompt (JSON)','Prompt (XML)'].some(x => heading === x)) return 'Prompt Templates';
+    if (['Max Response Tokens','Include Last X Messages','Include Last X WTracker Messages'].some(x => label.startsWith(x))) return 'Context Limits';
+    // Keep compatibility with the native, original 12-row settings layout.
+    return position < 4 ? 'Generation' : position === 4 ? 'Schema & Card' : position < 8 ? 'Prompt Templates' : 'Context Limits';
+}
+
+function installRoleplayToggle(section, getEnabled, setEnabled) {
+    const body = section.querySelector('.wtracker-ui-section-body');
+    if (!body) return;
+    let row = body.querySelector('.wtracker-roleplay-injection-row');
+    if (!row) {
+        row = document.createElement('label');
+        row.className = 'wtracker-roleplay-injection-row';
+        row.title = 'When enabled, the last tracker JSON is sent to the main roleplay model as a user message. Disabled: only WTracker Qwen receives previous tracker states.';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = 'wtracker-roleplay-injection';
+        checkbox.addEventListener('change', () => setEnabled(checkbox.checked));
+        const text = document.createElement('span');
+        text.className = 'wtracker-roleplay-injection-label';
+        text.textContent = 'Send tracker JSON to roleplay model';
+        const help = document.createElement('span');
+        help.className = 'fa-regular fa-circle-question wtracker-help-icon';
+        help.setAttribute('aria-hidden','true');
+        row.append(checkbox, text, help);
+        body.append(row);
     }
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    if (checkbox) checkbox.checked = getEnabled();
+}
+
+function decorateSettingsLayout(container, getEnabled, setEnabled) {
+    if (!container) return;
     decorateProfilePanel(container.querySelector('#wtracker-config-profiles'));
-    const rows = Array.from(container.children).filter(node => node.classList?.contains('setting-row'));
-    if (!rows.length) return;
-    const groups = [
-        { title: 'Generation', subtitle: 'Model and behaviour', icon: 'fa-sliders', open: true, items: rows.slice(0, 4) },
-        { title: 'Schema & Card', subtitle: 'Tracked data and visual template', icon: 'fa-table-list', open: false, items: rows.slice(4, 5) },
-        { title: 'Prompt Templates', subtitle: 'Instructions used by the model', icon: 'fa-file-lines', open: false, items: rows.slice(5, 8) },
-        { title: 'Context Limits', subtitle: 'How much recent history is included', icon: 'fa-gauge-high', open: false, items: rows.slice(8) },
-    ];
-    groups.forEach(group => {
-        if (!group.items.length) return;
-        const section = makeSection(group.title, group.subtitle, group.icon, group.open);
-        const body = section.querySelector('.wtracker-ui-section-body');
-        group.items.forEach(row => body.append(row));
-        if (group.title === 'Generation') {
-            const row = document.createElement('label');
-            row.className = 'wtracker-roleplay-injection-row';
-            row.title = 'When enabled, the last tracker JSON is sent to the main roleplay model as a user message. Leave disabled to prevent technical JSON appearing in roleplay responses. WTracker Qwen still receives its previous tracker states.';
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.id = 'wtracker-roleplay-injection';
-            checkbox.checked = settings.sendTrackerStateToRoleplayModel === true;
-            checkbox.addEventListener('change', () => {
-                const enabled = checkbox.checked;
-                settings.sendTrackerStateToRoleplayModel = enabled;
-                store()[activeId()].config.sendTrackerStateToRoleplayModel = enabled;
-                save();
-            });
-            const text = document.createElement('span');
-            text.className = 'wtracker-roleplay-injection-label';
-            text.textContent = 'Send tracker JSON to roleplay model';
-            const help = document.createElement('span');
-            help.className = 'fa-regular fa-circle-question wtracker-help-icon';
-            help.setAttribute('aria-hidden', 'true');
-            row.append(checkbox, text, help);
-            body.append(row);
-        }
-        container.append(section);
-    });
+
+    const nakedRows = Array.from(container.children).filter(node => node.classList?.contains('setting-row'));
+    const sections = new Map(Array.from(container.querySelectorAll(':scope > .wtracker-ui-section')).map(section =>
+        [section.dataset.section, section]));
+    if (nakedRows.length) {
+        // Create missing sections in the original order. Preserve open/closed state
+        // from the last time this settings panel was displayed.
+        WTRACKER_SECTION_DEFINITIONS.forEach(def => {
+            if (sections.has(def.key)) return;
+            const section = makeSection(def.key, def.subtitle, def.icon,
+                wtrackerSectionOpenState.has(def.key) ? wtrackerSectionOpenState.get(def.key) : def.open);
+            section.dataset.section = def.key;
+            section.addEventListener('toggle', () => wtrackerSectionOpenState.set(def.key, section.open));
+            container.append(section);
+            sections.set(def.key, section);
+        });
+        nakedRows.forEach((row, index) => {
+            const name = whichWTrackerSection(row, index);
+            sections.get(name)?.querySelector('.wtracker-ui-section-body')?.append(row);
+        });
+    }
+    const generation = sections.get('Generation');
+    if (generation) installRoleplayToggle(generation, getEnabled, setEnabled);
     decorateFieldLabels(container);
 }
 
@@ -256,6 +284,13 @@ function startAddon(manager, context) {
         return JSON.stringify(['character', String(avatar || charId), String(id)]);
     };
     const bindings = () => settings.configurationChatBindings;
+    const getRoleplayToggle = () => settings.sendTrackerStateToRoleplayModel === true;
+    const setRoleplayToggle = enabled => {
+        settings.sendTrackerStateToRoleplayModel = enabled === true;
+        const profile = store()[activeId()];
+        if (profile) profile.config.sendTrackerStateToRoleplayModel = enabled === true;
+        save();
+    };
     const boundId = (key = chatIdentity()) =>
         key && Object.hasOwn(bindings(), key) ? bindings()[key] : null;
 
@@ -407,6 +442,7 @@ function startAddon(manager, context) {
         if (!container) return;
         if (container.querySelector('#wtracker-config-profiles')) {
             updateControls(container.querySelector('#wtracker-config-profiles'));
+            decorateSettingsLayout(container, getRoleplayToggle, setRoleplayToggle);
             return;
         }
         const panel = document.createElement('fieldset');
@@ -532,7 +568,7 @@ function startAddon(manager, context) {
             scheduleDraw();
         });
         updateControls(panel);
-        decorateSettingsLayout(container);
+        decorateSettingsLayout(container, getRoleplayToggle, setRoleplayToggle);
     }
     function updateControls(panel = document.getElementById('wtracker-config-profiles')) {
         if (!panel) return;
@@ -553,9 +589,11 @@ function startAddon(manager, context) {
             debug.title = `Last CHAT_CHANGED argument: ${lastChatEvent}; mapping key: ${key || '(none)'}`;
         }
         panel.querySelector('[data-action=bind]').disabled = !chatIdentity();
-        panel.querySelector('[data-action=bind]').textContent = linkedId
-            ? 'Bind selected (replace this chat binding)'
-            : 'Bind selected to this chat';
+        const bindButton = panel.querySelector('[data-action=bind]');
+        const desiredBindLabel = linkedId ? 'Rebind chat' : 'Bind to chat';
+        const bindLabel = bindButton.querySelector('.wtracker-action-label');
+        if (bindLabel) bindLabel.textContent = desiredBindLabel;
+        else bindButton.textContent = desiredBindLabel;
         panel.querySelector('[data-action=unbind]').disabled = !linkedId;
         panel.querySelector('[data-action=default]').disabled = settings.defaultConfigurationProfile === activeId();
         const sendCheckbox = document.querySelector('#wtracker-roleplay-injection');
@@ -570,7 +608,13 @@ function startAddon(manager, context) {
     const root = document.getElementById('wtracker-react-settings-root');
     if (root && typeof MutationObserver !== 'undefined') {
         const observer = new MutationObserver(() => {
-            if (!document.getElementById('wtracker-config-profiles')) scheduleDraw();
+            const container = root.querySelector('.wtracker-container');
+            if (!container) return;
+            const missingPanel = !container.querySelector('#wtracker-config-profiles');
+            // Native React can reinsert its raw rows after a settings change.
+            // Re-group only those rows, not the chat, and never poll.
+            const escapedRows = Array.from(container.children).some(node => node.classList?.contains('setting-row'));
+            if (missingPanel || escapedRows) scheduleDraw();
         });
         observer.observe(root, { childList: true, subtree: true });
         // Native controls may need refreshing when someone OPENS the drawer.
