@@ -221,6 +221,8 @@ function startAddon(manager, context) {
         // SillyTavern officially publishes CHAT_CHANGED after loading the
         // chat. One event -> one settings switch, no 75/350ms timers.
         syncChat(eventChatId);
+        console.debug('[WTracker Profiles v5] CHAT_CHANGED', {eventId: lastChatEvent,
+            key: activeChatKey, selectedProfile: activeId(), boundProfile: activeChatBinding});
     }
 
     // Observe the settings drawer because native WTracker is rendered by React,
@@ -377,8 +379,11 @@ function startAddon(manager, context) {
         if (debug) {
             const key = chatIdentity();
             const id = activeId();
-            debug.textContent = `Detected chat: ${key ? JSON.parse(key).at(-1) : '(none)'} · Active: ${store()[id]?.name || id} · Switch events: ${observedChatEvents}`;
-            debug.title = `Last CHAT_CHANGED argument: ${lastChatEvent}; mapping key: ${key || '(none)'}`;
+            const bound = key ? bindings()[key] : null;
+            const fresh = SillyTavern.getContext();
+            const getterChat = fresh?.getCurrentChatId?.();
+            debug.textContent = `Detected chat: ${key ? JSON.parse(key).at(-1) : '(none)'} · Bound: ${store()[bound]?.name || '(none)'} · Active: ${store()[id]?.name || id} · Switch events: ${observedChatEvents} · Stored bindings: ${Object.keys(bindings()).length}`;
+            debug.title = `Event ID: ${lastChatEvent}; getCurrentChatId: ${String(getterChat)}; chatId: ${String(fresh?.chatId)}; key: ${key || '(none)'}`;
         }
         panel.querySelector('[data-action=bind]').disabled = !chatIdentity();
         panel.querySelector('[data-action=bind]').textContent = linkedId
@@ -408,7 +413,9 @@ function startAddon(manager, context) {
     scheduleDraw();
     const eventType = context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED;
     if (!eventType) console.error('[WTracker Profiles] CHAT_CHANGED event is not available.');
-    else context.eventSource.on(eventType, handleChatChanged);
+    else if (typeof context.eventSource.makeFirst === 'function') {
+        context.eventSource.makeFirst(eventType, handleChatChanged);
+    } else context.eventSource.on(eventType, handleChatChanged);
     // Initial sync once, after the original settings have been initialized.
     syncChat();
 
