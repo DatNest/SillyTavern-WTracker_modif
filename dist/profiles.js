@@ -55,6 +55,7 @@ function startAddon(manager, context) {
     const saveNative = manager.saveSettings.bind(manager);
     let applying = false;
     let activeChatKey = null;
+    let activeChatBinding = null;
     const save = () => saveNative();
     const store = () => settings.configurationProfiles;
     const activeId = () => settings.activeConfigurationProfile;
@@ -86,46 +87,112 @@ function startAddon(manager, context) {
     function switchTo(id, setDefault = false) {
         const found = store()[id];
         if (!found) return false;
+        const configurationChanged = activeId() !== id;
+        const defaultChanged = setDefault && settings.defaultConfigurationProfile !== id;
+        // Binding an already active profile must NOT remount the whole React
+        // settings drawer; doing so makes the open panel collapse.
+        if (!configurationChanged && !defaultChanged) {
+            scheduleDraw();
+            return true;
+        }
         applying = true;
         try {
-            for (const key of PROFILE_KEYS) settings[key] = clone(found.config[key]);
-            settings.activeConfigurationProfile = id;
+            if (configurationChanged) {
+                for (const key of PROFILE_KEYS) settings[key] = clone(found.config[key]);
+                settings.activeConfigurationProfile = id;
+            }
             if (setDefault) settings.defaultConfigurationProfile = id;
             save();
         } finally {
             applying = false;
         }
-        globalThis.__wtrackerRefreshSettings?.();
+        if (configurationChanged) refreshNativeSettings();
         scheduleDraw();
         return true;
     }
 
+    function refreshNativeSettings() {
+        if (typeof globalThis.__wtrackerRefreshSettings !== 'function') return;
+        const root = document.getElementById('wtracker-react-settings-root');
+        const oldDrawer = root?.querySelector('.inline-drawer-content');
+        // Only restore the drawer when it was previously open. Preserve the
+        // original SillyTavern closed-state CSS for all other cases.
+        const wasOpen = !!oldDrawer && (typeof getComputedStyle !== 'function'
+            ? oldDrawer.style.display !== 'none'
+            : getComputedStyle(oldDrawer).display !== 'none');
+        if (!wasOpen || !root || typeof MutationObserver === 'undefined') {
+            globalThis.__wtrackerRefreshSettings();
+            return;
+        }
+        let restored = false;
+        const observer = new MutationObserver(() => {
+            const drawer = root.querySelector('.inline-drawer-content');
+            if (!drawer || drawer === oldDrawer) return;
+            if (restored) return;
+            restored = true;
+            // React recreated the drawer, so restore its visible state.
+            drawer.style.display = 'block';
+            root.querySelector('.inline-drawer-icon')?.classList.remove('down');
+            observer.disconnect();
+        });
+        observer.observe(root, { childList: true, subtree: true });
+        globalThis.__wtrackerRefreshSettings();
+        // Safety: observer is only needed during this React commit.
+        setTimeout(() => observer.disconnect(), 1500);
+    }
+
+    function persistChatMetadata(current) {
+        // saveMetadataDebounced exists in recent SillyTavern versions. Use the
+        // official saveMetadata fallback for older builds.
+        if (typeof current.saveMetadataDebounced === 'function') current.saveMetadataDebounced();
+        else if (typeof current.saveMetadata === 'function') {
+            Promise.resolve(current.saveMetadata()).catch(error =>
+                console.error('WTracker: could not save chat binding', error));
+        }
+    }
     function setChatBinding(id) {
         const current = chatContext();
         if (!current || !store()[id]) return false;
         current.chatMetadata[CHATTRACKER] ||= {};
         current.chatMetadata[CHATTRACKER][BINDKEY] = id;
-        current.saveMetadataDebounced();
+        activeChatKey = chatIdentity();
+        activeChatBinding = id;
+        persistChatMetadata(current);
         switchTo(id);
+        scheduleDraw();
         return true;
     }
     function removeChatBinding() {
         const current = chatContext();
         if (!current?.chatMetadata?.[CHATTRACKER]?.[BINDKEY]) return;
         delete current.chatMetadata[CHATTRACKER][BINDKEY];
-        current.saveMetadataDebounced();
+        activeChatBinding = null;
+        persistChatMetadata(current);
         switchTo(settings.defaultConfigurationProfile);
+        scheduleDraw();
     }
     function syncChat() {
         const key = chatIdentity();
-        if (key === activeChatKey) return;
-        activeChatKey = key;
         let selected = boundId();
         if (selected && !store()[selected]) {
-            removeChatBinding();
+            const current = chatContext();
+            if (current?.chatMetadata?.[CHATTRACKER]) {
+                delete current.chatMetadata[CHATTRACKER][BINDKEY];
+                persistChatMetadata(current);
+            }
             selected = null;
         }
+        // Checking both the chat and its binding also handles cases in which
+        // the host supplies chatMetadata shortly after the chat ID changes.
+        if (key === activeChatKey && selected === activeChatBinding &&
+            activeId() === (selected || settings.defaultConfigurationProfile)) {
+            scheduleDraw();
+            return;
+        }
+        activeChatKey = key;
+        activeChatBinding = selected;
         switchTo(selected || settings.defaultConfigurationProfile);
+        scheduleDraw();
     }
 
     // Observe the settings drawer because native WTracker is rendered by React,
@@ -190,6 +257,7 @@ function startAddon(manager, context) {
         panel.addEventListener('click', async event => {
             const button = event.target.closest('button[data-action]');
             if (!button) return;
+            event.stopPropagation();
             switch (button.dataset.action) {
                 case 'new': {
                     const name = window.prompt('Name of new settings profile:', 'New profile')?.trim();
@@ -224,7 +292,7 @@ function startAddon(manager, context) {
                     if (boundId() === removedId) {
                         const current = chatContext();
                         delete current.chatMetadata[CHATTRACKER][BINDKEY];
-                        current.saveMetadataDebounced();
+                        persistChatMetadata(current);
                     }
                     switchTo(settings.defaultConfigurationProfile);
                     notify('Profile deleted.');
@@ -287,6 +355,12 @@ function startAddon(manager, context) {
     }
     scheduleDraw();
     context.eventSource.on(context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED || 'chat_id_changed', syncChat);
+    // Cheap consistency check when returning to the extension settings after
+    // a chat transition. It does not poll and does not remount unnecessarily.
+    const settingsRoot = document.getElementById('wtracker-react-settings-root');
+    settingsRoot?.addEventListener('pointerdown', () => {
+        if (chatIdentity() !== activeChatKey) syncChat();
+    }, true);
     // The original module subscribes asynchronously after loading a template;
     // this handler is independent and runs when a chat is opened.
     syncChat();
